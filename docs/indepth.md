@@ -50,6 +50,12 @@ The important current rule is:
 
 This avoids the older bug where stage 0's first prompt kept being replayed as the active user instruction for later stages.
 
+Each stage also records its opening prompt in `messages` as a `stage_input` entry (HITL answers are
+`hitl_input` entries). Providers that replay persisted history (Anthropic, Gemini, DeepSeek) use
+these to send earlier stages in order and end on the current stage's instructions; see
+`IkaModel/history_replay.py`. Replay also skips entries already present in the live message buffer,
+so a round is never sent twice.
+
 ### Control Tools
 
 IkaCore models agent control through tool calls instead of hidden side channels.
@@ -92,6 +98,28 @@ The semantics are intentionally strict:
 
 This behavior is enforced by tests in [`test_workflow_semantics.py`](../src/IkaTest/test_workflow_semantics.py).
 
+Async runs are scheduled as dataflow (`IkaCore/workflow_dataflow.py`). A node starts as soon as
+all of its own dependencies have completed, not when every concurrently running node has
+finished. Its context (upstream results through `compress_hook`) is prepared once per node, off
+the scheduler thread, and shared by all of its instances. Completion semantics are unchanged: a
+node completes when all its instances finish, and a failed instance blocks the node's
+dependents.
+
+Summary calls along edges are kept to what the semantics need:
+- `initial_context` reaches the start node verbatim; it's never paraphrased.
+- In both sync and async runs, an edge's upstream result is summarized once, by the consumer.
+- Within one run, nodes whose default-hook summary request would be byte-identical (same upstream
+  texts, same model and API key) share a single summary call. Custom `compress_hook`s are never
+  shared.
+- The default hook only summarizes when the merged upstream context exceeds
+  `IkaWorkflow(summarize_context_above_tokens=4000)` estimated tokens; shorter context is passed
+  through verbatim. Pass `None` to always summarize. Measured on live DeepSeek, a summary call on the
+  critical path cost ~6 s (its output tokens), while the input tokens it saved downstream had no
+  measurable latency effect, so summaries are worth it only for large contexts.
+- A node receives upstream context *in addition to* its own prompt: `inject_workflow_context`
+  prepends it, labeled, to the agent's prompt, so simple and staged agents keep their instructions.
+  `next_agent` hand-offs work the same way.
+
 ### Provider Layer
 
 `IkaModel` separates three concerns:
@@ -106,6 +134,19 @@ Important current behavior:
 - OpenAI Chat Completions requires `use_responses_api=False`
 - Codex is a separate provider that targets `CODEX_API_URL`
 - explicit non-OpenAI URLs are respected
+
+Provider requests share one retry policy (`IkaModel/retry_policy.py`). Only 408, 409, 429 and
+5xx (including 529) are retried; other errors fail on the first attempt, so a context-length
+error goes straight to the summarize-and-resend fallback. Waits follow the provider's hint
+(`Retry-After` in seconds or as an HTTP-date, `retry-after-ms`, OpenAI's `x-ratelimit-reset-*`,
+Google's `RetryInfo.retryDelay`); without a hint they use exponential backoff from 1 s with
+jitter.
+
+Connections are pooled process-wide (`IkaModel/http_pool.py`). Every agent still owns its
+`httpx.Client`, but all clients share one keep-alive pool through a transport whose `close()`
+does nothing, so owners close their clients as before. Async agents run chat rounds on a
+persistent per-thread event loop (`IkaModel/async_runner.py`) so their per-loop pool survives
+between rounds.
 
 Codex auth is intentionally not automatic in the request path. The Codex provider treats `BareBoneModel.api_key` as the literal bearer token. Users can pass their own bearer token, or call `IkaModel.codex.codex_auth.get_bearer()` to read and refresh the Codex CLI credentials from `~/.codex/auth.json` or `$CODEX_HOME/auth.json`.
 

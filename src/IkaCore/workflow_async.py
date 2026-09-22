@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Set
 from IkaCore.cli_output import get_cli_output
 
 from .workflow_core import WorkflowNodeExecutionMixin
+from .workflow_dataflow import DataflowRun
 from .workflow_types import WorkflowNode, WorkflowResult, WorkflowStateProtocol
 
 
@@ -26,6 +27,7 @@ class WorkflowAsyncStateMixin(WorkflowNodeExecutionMixin):
         if initial_context:
             upstream_contexts[self.start_node] = [initial_context]
 
+        self._reset_context_memo(initial_context)
         self._results = {}
         self._visiting = set()
         ready_nodes: Set[str] = {self.start_node}
@@ -226,24 +228,8 @@ class WorkflowAsyncExecutionMixin(WorkflowAsyncResultMixin):
         cli = get_cli_output()
         self._start_async_cli(cli)
 
-        while ready_nodes or any(node_futures.values()):
-            current_futures = self._schedule_ready_async_nodes(
-                ready_nodes,
-                upstream_contexts,
-                initial_context,
-                node_futures,
-                cli,
-                completed_count=len(completed_nodes),
-            )
-            self._process_async_results(
-                current_futures,
-                upstream_contexts,
-                completed_nodes,
-                ready_nodes,
-                pending_nodes,
-                node_futures,
-            )
-            self._activate_unblocked_pending_nodes(pending_nodes, completed_nodes, ready_nodes)
+        # Event-driven: each node starts as soon as its own dependencies finish (see workflow_dataflow).
+        DataflowRun(self, upstream_contexts, ready_nodes, completed_nodes, pending_nodes, initial_context, cli).run()
 
         self.async_executor.drain()
         self._finish_async_cli(cli)

@@ -103,8 +103,9 @@ class TestBareBoneToRequestPayload:
         assert tools[0]["type"] == "function"
         assert tools[0]["function"]["name"] == "agent_end"
         assert "parameters" in tools[0]["function"]
-        assert "tool_choice" in payload
-        assert payload["tool_choice"]["function"]["name"] == "agent_end"
+        # agent_end is required but is a loop-control tool: pinning it would force it on
+        # every request and stop the model from using any other tool.
+        assert payload["tool_choice"] == "auto"
 
     def test_build_request_summary_in_messages(self):
         model = _barebone_with_tools()

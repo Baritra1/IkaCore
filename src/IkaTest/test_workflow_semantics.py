@@ -243,6 +243,7 @@ class TestWorkflowValidationDisplayAndContext:
             description="workflow",
             nodes=[WorkflowNode("agent", agent)],
             edges=[],
+            summarize_context_above_tokens=None,  # always summarise: this test covers the summarise/fallback path
         )
 
         assert workflow._default_compress_hook([], agent) == ""
@@ -258,8 +259,14 @@ class TestWorkflowValidationDisplayAndContext:
     def test_sync_run_propagates_initial_and_upstream_context_and_detects_cycles(self):
         root = _agent("root")
         follower = _agent("follower")
-        root.execution = MagicMock(return_value={"final_message": "root final", "summary": "root summary"})
-        follower.execution = MagicMock(return_value={"final_message": "follower final", "summary": "follower summary"})
+        seen = {}
+        root.execution = MagicMock(
+            side_effect=lambda: seen.setdefault("root", root.prompt) and {"final_message": "root final", "summary": "root summary"}
+        )
+        follower.execution = MagicMock(
+            side_effect=lambda: seen.setdefault("follower", follower.prompt)
+            and {"final_message": "follower final", "summary": "follower summary"}
+        )
         workflow = IkaWorkflow(
             name="sync-context",
             description="workflow",
@@ -271,8 +278,10 @@ class TestWorkflowValidationDisplayAndContext:
         results = workflow.run(initial_context="initial")
 
         assert set(results) == {"root", "follower"}
-        assert "initial" in root.message_history["first_input"]["message"]
-        assert "root summary" in follower.message_history["first_input"]["message"]
+        # Each node runs on its own prompt plus the upstream context, and the caller's agents are restored after.
+        assert seen["root"] == "Context from upstream workflow steps:\ninitial\n\nroot prompt"
+        assert seen["follower"] == "Context from upstream workflow steps:\nroot summary\n\nfollower prompt"
+        assert (root.prompt, follower.prompt) == ("root prompt", "follower prompt")
         assert workflow._run_node("root", {}) is results["root"]
 
         workflow._results.pop("follower")
@@ -478,7 +487,7 @@ class TestWorkflowAsyncSemantics:
         assert by_node["async"]["result"]["final_message"] == "async done"
         assert by_node["failing"]["success"] is False
         assert by_node["failing"]["result"]["error"] == "failed"
-        assert "sync context" in sync_agent.message_history["first_input"]["message"]
+        assert sync_agent.prompt == "Context from upstream workflow steps:\nsync context\n\nsync prompt"
         assert executor.pending_tasks == {}
         assert set(executor.completed_results) == {"sync_1", "async_2", "failing_3"}
 

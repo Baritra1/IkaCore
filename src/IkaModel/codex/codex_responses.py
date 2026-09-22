@@ -32,7 +32,7 @@ from IkaCore.agent_runtime_payloads import JsonDict, history_section, json_dict,
 
 from ..base import AgentTool, BareBoneModel
 from ..model_metadata import CODEX_KNOWN_MODELS as CODEX_KNOWN_MODELS
-from ..tool_schema import build_provider_tool_payload
+from ..tool_schema import CONTROL_TOOL_NAMES, build_provider_tool_payload
 
 
 def _wrap_user_content(content: object) -> list[JsonDict]:
@@ -187,10 +187,9 @@ def _build_codex_input_items(messages: list[JsonDict], message_history: JsonDict
 
 
 def _required_non_control_tools(agent_tools: list[AgentTool]) -> list[AgentTool]:
-    control_tools = {"agent_end", "stage_end", "change_stage"}
     return [
         tool for tool in agent_tools
-        if getattr(tool, "required", False) and tool.name not in control_tools
+        if getattr(tool, "required", False) and tool.name not in CONTROL_TOOL_NAMES
     ]
 
 

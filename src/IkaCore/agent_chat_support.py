@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import asyncio
 from typing import Any, Callable, Dict, List, Optional, Protocol
 
 from IkaCore.cli_output import get_cli_output
+from IkaModel.async_runner import run_coroutine
 from IkaModel.base import AgentEndException, AgentTool, BareBoneModel
 from IkaModel.chat_interface.chat_interface import async_chat, chat, summarise_message_history
 
@@ -134,7 +134,8 @@ class AgentChatRoundMixin(AgentChatTotalsMixin):
             "total_stages": total_stages,
         }
         if self.use_async:
-            return asyncio.run(async_chat(barebone_model, messages, message_history, **kwargs))
+            # Persistent per-thread loop: pooled provider connections survive between rounds.
+            return run_coroutine(async_chat(barebone_model, messages, message_history, **kwargs))
         return chat(barebone_model, messages, message_history, **kwargs)
 
     def chat_wrapper(

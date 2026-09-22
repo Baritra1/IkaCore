@@ -7,9 +7,16 @@ from typing import Any, NamedTuple, cast
 JsonSchema = dict[str, Any]
 
 
+# Loop-control tools are marked required so the model knows it must eventually
+# call them, but pinning tool_choice to one of them forces it on *every* request,
+# which stops the model from ever using the agent's other tools.
+CONTROL_TOOL_NAMES = frozenset({"agent_end", "stage_end", "change_stage"})
+
+
 class ProviderToolPayload(NamedTuple):
     tools: list[JsonSchema]
     names: frozenset[str]
+    # Required tools that may pin tool_choice (control tools excluded).
     required_names: tuple[str, ...]
 
 
@@ -122,7 +129,11 @@ def build_provider_tool_payload(provider: str, tools: list[Any]) -> ProviderTool
         return cached
 
     names = frozenset(getattr(tool, "name", "") for tool in tools)
-    required_names = tuple(getattr(tool, "name", "") for tool in tools if getattr(tool, "required", False))
+    required_names = tuple(
+        getattr(tool, "name", "")
+        for tool in tools
+        if getattr(tool, "required", False) and getattr(tool, "name", "") not in CONTROL_TOOL_NAMES
+    )
     rendered = [_build_provider_tool(provider, tool) for tool in tools]
     payload = ProviderToolPayload(rendered, names, required_names)
     if len(_PROVIDER_TOOL_CACHE) >= _PROVIDER_TOOL_CACHE_MAX:

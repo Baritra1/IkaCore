@@ -50,10 +50,17 @@ def test_response_preview_helpers_handle_json_and_text_bodies():
     assert _error_text_from_response(text_response, 200) == "plain error body"
 
 
-def test_rate_limit_wait_time_uses_retry_after_or_clamped_backoff():
-    assert _rate_limit_wait_time(httpx.Response(429, headers={"retry-after": "12"}), 10, 0) == (12, True)
-    assert _rate_limit_wait_time(httpx.Response(429, headers={"retry-after": "not-int"}), 1, 0) == (30, False)
-    assert _rate_limit_wait_time(httpx.Response(429), 200, 3) == (300, False)
+def _jittered(value, base):
+    return 0.75 * base <= value <= base
+
+
+def test_rate_limit_wait_time_uses_provider_hint_or_jittered_backoff():
+    assert _rate_limit_wait_time(httpx.Response(429, headers={"retry-after": "12"}), 10, 0) == (12.0, True)
+    assert _rate_limit_wait_time(httpx.Response(429, headers={"retry-after": "0.8"}), 10, 0) == (0.8, True)
+    wait, hinted = _rate_limit_wait_time(httpx.Response(429, headers={"retry-after": "not-int"}), 1, 0)
+    assert not hinted and _jittered(wait, 1)
+    wait, hinted = _rate_limit_wait_time(httpx.Response(429), 200, 3)
+    assert not hinted and _jittered(wait, 30)  # capped at MAX_BACKOFF_S
 
 
 def test_retry_delay_helpers_return_or_raise_typed_errors():
@@ -64,7 +71,7 @@ def test_retry_delay_helpers_return_or_raise_typed_errors():
             attempt=0,
             max_retries=2,
         )
-    assert wait == 30
+    assert _jittered(wait, 1)
     assert isinstance(err, ri.IkaRateLimitError)
     assert err.status_code == 429
 
@@ -77,20 +84,20 @@ def test_retry_delay_helpers_return_or_raise_typed_errors():
         )
 
     wait, err = ri._timeout_retry_delay_and_error(timeout=0.5, wait_seconds=2, attempt=0, max_retries=2)
-    assert wait == 2
+    assert _jittered(wait, 2)
     assert isinstance(err, ri.IkaTimeoutError)
     with pytest.raises(ri.IkaTimeoutError):
         ri._timeout_retry_delay_and_error(timeout=0.5, wait_seconds=2, attempt=1, max_retries=2)
 
     wait, err = ri._http_retry_delay_and_error(httpx.ConnectError("down"), wait_seconds=3, attempt=0, max_retries=2)
-    assert wait == 3
+    assert _jittered(wait, 3)
     assert isinstance(err, ri.IkaHTTPError)
     with pytest.raises(ri.IkaHTTPError, match="after 2 attempts"):
         ri._http_retry_delay_and_error(httpx.ConnectError("down"), wait_seconds=3, attempt=1, max_retries=2)
 
     original = RuntimeError("unexpected")
     wait, err = ri._unexpected_retry_delay_and_error(original, wait_seconds=4, attempt=0, max_retries=2)
-    assert (wait, err) == (4, original)
+    assert _jittered(wait, 4) and err is original
     with pytest.raises(RuntimeError, match="unexpected"):
         ri._unexpected_retry_delay_and_error(original, wait_seconds=4, attempt=1, max_retries=2)
 
@@ -113,7 +120,8 @@ def test_sync_api_retry_retries_server_error_then_succeeds():
 
     assert response.json() == {"ok": True}
     assert post.call_count == 2
-    sleep.assert_called_once_with(1)
+    sleep.assert_called_once()
+    assert _jittered(sleep.call_args.args[0], 1)
 
 
 def test_sync_api_retry_raises_typed_error_after_final_server_error():
@@ -158,7 +166,8 @@ def test_sync_api_retry_dispatches_codex_and_retries_http_errors():
             response = api_request_retry("https://example.test", {}, {}, max_retries=2, wait_seconds=1)
 
     assert response.json() == {"ok": True}
-    sleep.assert_called_once_with(1)
+    sleep.assert_called_once()
+    assert _jittered(sleep.call_args.args[0], 1)
 
     with patch("IkaModel.request_interface.httpx.post", side_effect=ValueError("bad client")):
         with pytest.raises(ValueError, match="bad client"):
@@ -232,7 +241,10 @@ def test_async_api_retry_dispatches_codex_closes_owned_client_and_raises_last_er
 
     created = []
 
-    def make_client(timeout):
+    def make_client(timeout, verify):
+        from IkaModel.http_config import shared_ssl_context
+
+        assert verify is shared_ssl_context()
         client = FakeAsyncClient(timeout)
         created.append(client)
         return client

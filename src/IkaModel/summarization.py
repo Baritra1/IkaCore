@@ -11,6 +11,7 @@ import httpx
 from IkaCore.agent_runtime_payloads import JsonDict, history_message_text, history_section, json_dict, string_value
 
 from .base import BareBoneModel
+from .http_pool import default_pooled_client, new_pooled_async_client
 from .model_metadata import (
     OPENAI_CHAT_COMPLETIONS_URL,
     get_api_url_for_model,
@@ -417,7 +418,7 @@ def run_summarization(
     )
 
     try:
-        response = api_request_retry(api_url, headers, payload, max_retries=3, wait_seconds=10, client=client)
+        response = api_request_retry(api_url, headers, payload, max_retries=3, client=client or default_pooled_client())
         response.raise_for_status()
         data = json_dict(response.json())
         summary = parse_summary_response(provider, response)
@@ -481,8 +482,9 @@ async def async_summarise_message_history(
         user_prompt_prefix=user_prompt_prefix,
     )
 
+    pooled = new_pooled_async_client(900.0) if client is None else None
     try:
-        response = await async_api_request_retry(api_url, headers, payload, max_retries=3, wait_seconds=10, client=client)
+        response = await async_api_request_retry(api_url, headers, payload, max_retries=3, client=client or pooled)
         response.raise_for_status()
         data = json_dict(response.json())
         summary = parse_summary_response(provider, response)
@@ -498,3 +500,6 @@ async def async_summarise_message_history(
     except (RuntimeError, ValueError, TypeError, KeyError) as e:
         _LOG.error(f"Unexpected error during summarization: {e}")
         return ""
+    finally:
+        if pooled is not None:
+            await pooled.aclose()

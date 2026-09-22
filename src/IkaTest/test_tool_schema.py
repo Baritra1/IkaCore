@@ -91,3 +91,37 @@ def test_provider_tool_payload_renders_provider_shapes_and_cache_eviction():
         ts._PROVIDER_TOOL_CACHE_MAX = original_max
         ts._PROVIDER_TOOL_CACHE.clear()
         ts._PROVIDER_TOOL_FAST_CACHE.clear()
+
+
+def test_control_tools_never_pin_tool_choice_but_user_required_tools_do():
+    from IkaModel.anthropic.claude import anthropic_fill_payload
+    from IkaModel.base import AgentTool, ToolArgs
+    from IkaModel.openai.openai import openai_fill_payload
+    from IkaModel.openai.openai_responses import openai_responses_fill_payload
+    from IkaModel.tool_schema import CONTROL_TOOL_NAMES, build_provider_tool_payload
+
+    def tool(name, required):
+        return AgentTool(name, name, f"{name} tool", ToolArgs(type="input", description="x"), required=required)
+
+    controls = [tool(name, True) for name in sorted(CONTROL_TOOL_NAMES)]
+    assert build_provider_tool_payload("openai", controls).required_names == ()
+
+    class Model:
+        model_id, max_tokens, temperature, system_prompt = "gpt-4o", 100, 0.0, ""
+        parallel_tool_calls, forced_tool_name, reasoning_effort = False, None, None
+
+    history = {"system": {"message": ""}, "first_input": {"message": ""}, "summary": {"message": ""}, "messages": {}}
+    msgs = [{"role": "user", "content": "hi"}]
+    only_control = [tool("lookup", False), tool("agent_end", True)]
+    with_user_required = [tool("submit_report", True), tool("agent_end", True)]
+
+    assert openai_fill_payload(Model(), msgs, history, only_control)["tool_choice"] == "auto"
+    assert openai_responses_fill_payload(Model(), msgs, history, only_control)["tool_choice"] == "auto"
+    assert anthropic_fill_payload(Model(), msgs, history, only_control)["tool_choice"]["type"] == "auto"
+
+    assert openai_fill_payload(Model(), msgs, history, with_user_required)["tool_choice"] == {
+        "type": "function", "function": {"name": "submit_report"},
+    }
+    assert anthropic_fill_payload(Model(), msgs, history, with_user_required)["tool_choice"] == {
+        "type": "tool", "name": "submit_report",
+    }

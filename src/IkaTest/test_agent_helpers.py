@@ -160,10 +160,12 @@ class TestFinalPrompt:
         a.message_history["first_input"]["message"] = "original"
 
         a.inject_workflow_context("")
-        assert a.message_history["first_input"]["message"] == "original"
+        assert a.prompt == "P"
 
+        # Context is added to the agent's own task (which stage prompts are built from), never replacing it.
         a.inject_workflow_context("workflow context")
-        assert a.message_history["first_input"]["message"] == "workflow context\n\noriginal"
+        assert a.prompt == "Context from upstream workflow steps:\nworkflow context\n\nP"
+        assert a.message_history["first_input"]["message"] == "original"
 
         a.apply_workflow_stage_wiring({1: {"subagents": [subagent]}, 9: {"subagents": []}})
         assert stage1.subagents == [subagent]
@@ -962,7 +964,10 @@ class TestExecutionRuntimeHelpers:
 
     def test_next_agent_dispatch_uses_summary_or_final_message_as_next_input(self):
         next_agent = _minimal_agent(name="Next")
-        next_agent.execution = MagicMock(return_value={"final_message": "next done"})
+        prompts_seen = []
+        next_agent.execution = MagicMock(
+            side_effect=lambda: prompts_seen.append(next_agent.prompt) or {"final_message": "next done"}
+        )
         a = _minimal_agent(next_agent=next_agent, summarize_final=True)
         a.run_simple = MagicMock(return_value=("final", "final"))
         barebone = SimpleNamespace()
@@ -976,17 +981,23 @@ class TestExecutionRuntimeHelpers:
             out = a._run_next_agent_execution()
 
         assert out == {"final_message": "next done"}
-        assert next_agent.message_history["first_input"]["message"] == "Previous agent summary:\nshort summary"
+        # The next agent works on its own prompt with the hand-off as labelled context; its prompt is restored after.
+        assert prompts_seen == ["Previous agent summary:\nshort summary\n\nP"]
+        assert next_agent.prompt == "P"
+        assert next_agent.message_history["first_input"]["message"] == ""
         summarizer.assert_called_once_with(barebone, a.message_history)
         next_agent.execution.assert_called_once_with()
 
         other_next = _minimal_agent(name="OtherNext")
-        other_next.execution = MagicMock(return_value={"final_message": "other done"})
+        other_seen = []
+        other_next.execution = MagicMock(
+            side_effect=lambda: other_seen.append(other_next.prompt) or {"final_message": "other done"}
+        )
         b = _minimal_agent(next_agent=other_next, summarize_final=False)
         b.run_simple = MagicMock(return_value=("plain final", "plain final"))
 
         assert b._run_next_agent_execution() == {"final_message": "other done"}
-        assert other_next.message_history["first_input"]["message"] == "Previous agent summary:\nplain final"
+        assert other_seen == ["Previous agent summary:\nplain final\n\nP"]
 
     def test_simple_final_output_builds_summary_from_run_simple_result(self):
         a = _minimal_agent(system_prompt="system")
@@ -1200,6 +1211,26 @@ class TestParseControlCalls:
         assert a._parse_tool_arguments("[1, 2]") == {}
         assert a._parse_tool_arguments({"value": 1}) == {"value": 1}
         assert a._parse_tool_arguments(["not", "dict"]) == {}
+
+    def test_parse_tool_arguments_keeps_text_of_truncated_call(self):
+        """A final answer cut off by max_tokens keeps what the model wrote instead of becoming empty."""
+        a = _minimal_agent()
+
+        assert a._parse_tool_arguments('{"input": "Audit: north 45682, south 113') == {"input": "Audit: north 45682, south 113"}
+        assert a._parse_tool_arguments('{"input": "line one\\nline tw') == {"input": "line one\nline tw"}
+        assert a._parse_tool_arguments('{"input": "ends on an escape \\') == {"input": "ends on an escape "}
+        assert a._parse_tool_arguments('{"input": "caf\\u00') == {"input": "caf"}
+        assert a._parse_tool_arguments('{"items": ["a", "b') == {"items": ["a", "b"]}
+        assert a._parse_tool_arguments('{"input":') == {}  # cut between key and value: nothing to keep
+
+    def test_truncated_agent_end_returns_partial_answer(self):
+        a = _minimal_agent()
+        call = {"function": {"name": "agent_end", "arguments": '{"input": "Final report: north total 45682 and so'}}
+
+        _, ended, text = a.parse_control_calls([call], None)
+
+        assert ended is True
+        assert text == "Final report: north total 45682 and so"
 
     def test_agent_end_detected(self):
         a = _minimal_agent()

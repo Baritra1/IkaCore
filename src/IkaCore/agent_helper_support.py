@@ -208,8 +208,8 @@ class AgentRuntimeUtilityMixin:
         if self.use_async:
             return self.client
         if self.client is None:
-            import httpx
-            self.client = httpx.Client(timeout=self.step_timeout)
+            from IkaModel.http_pool import new_pooled_client
+            self.client = new_pooled_client(self.step_timeout)
         return self.client
 
     def _enforce_rate_limit(self, per_minute: Optional[float], last_ts_attr: str) -> None:

@@ -34,7 +34,7 @@ def test_codex_url_accepts_a_scoped_gateway_endpoint():
 
 
 def test_retry_after_falls_back_when_http_date_parser_raises():
-    with patch("IkaModel.codex.chat_helpers_codex.email.utils.parsedate_to_datetime", side_effect=ValueError("bad")):
+    with patch("IkaModel.retry_policy.email.utils.parsedate_to_datetime", side_effect=ValueError("bad")):
         assert _parse_retry_after("Wed, 21 Oct 2015 07:28:00 GMT", default=9) == 9.0
 
 

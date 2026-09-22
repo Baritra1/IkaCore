@@ -472,6 +472,13 @@ class StageRuntimeBuildMixin(StageRuntimeModelBuildMixin):
         content_prompt: str,
     ) -> list[JsonDict]:
         if resume_input is None:
+            # Persist where this stage began so history-replaying providers can send
+            # prior stages in order, ending on the current stage's instructions.
+            history_section(message_history, "messages")[str(uuid.uuid4())] = {
+                "message": content_prompt,
+                "tokens": 0,
+                "type": "stage_input",
+            }
             return [{"role": "user", "content": content_prompt}]
         if self.logger:
             self.logger.log_hitl_input(stage.name, resume_input)

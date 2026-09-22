@@ -22,6 +22,7 @@ class IkaWorkflow(WorkflowAsyncExecutionMixin):
         start_node: Optional[str] = None,
         async_executor: Optional[AsyncWorkflowExecutor] = None,
         max_parallel_workers: int = 30,
+        summarize_context_above_tokens: Optional[int] = 4000,
     ):
         if not nodes:
             raise ValueError("Workflow requires at least one node.")
@@ -30,6 +31,11 @@ class IkaWorkflow(WorkflowAsyncExecutionMixin):
         self.nodes = nodes
         self.edges = edges
         self.compress_hook = compress_hook or self._default_compress_hook
+        # Default hook only: upstream context at or under this size (estimated tokens) is passed
+        # through verbatim instead of spending an LLM call to summarise it. None = always summarise.
+        # A summary costs a full call of output-token latency on the critical path, while the input
+        # it saves is nearly free in latency on caching providers, so it pays off only for large context.
+        self.summarize_context_above_tokens = summarize_context_above_tokens
         self.start_node = start_node or nodes[0].name
         self.async_executor = async_executor or AsyncWorkflowExecutor(max_workers=max_parallel_workers)
 
@@ -46,6 +52,7 @@ class IkaWorkflow(WorkflowAsyncExecutionMixin):
         self._bind_stage_wiring()
         self._build_dependency_graph()
         self._next_reachable_nodes: Set[str] = self._compute_next_reachable_nodes()
+        self._reset_context_memo(None)
 
     def run(self, initial_context: Optional[str] = None, use_async: bool = False) -> Dict[str, WorkflowResult]:
         if use_async:
@@ -54,6 +61,7 @@ class IkaWorkflow(WorkflowAsyncExecutionMixin):
         upstream_contexts: Dict[str, List[str]] = {}
         if initial_context:
             upstream_contexts[self.start_node] = [initial_context]
+        self._reset_context_memo(initial_context)
         self._results = {}
         self._visiting = set()
         self._run_node(self.start_node, upstream_contexts)

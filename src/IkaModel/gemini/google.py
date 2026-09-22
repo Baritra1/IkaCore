@@ -1,6 +1,7 @@
 import json
 from typing import Any, Dict, List, Optional
 
+from ..history_replay import is_user_entry, plan_history_replay
 from ..tool_schema import build_provider_tool_payload
 
 
@@ -24,12 +25,13 @@ def _append_gemini_context(contents: List[Dict[str, Any]], message_history: Dict
         contents.append({"role": "model", "parts": [_gemini_text_part(message_history["summary"]["message"])]})
 
 
-def _append_gemini_history(contents: List[Dict[str, Any]], message_history: Dict[str, Any]) -> None:
-    for msg_id in message_history["messages"]:
-        msg = message_history["messages"][msg_id]
+def _append_gemini_history(contents: List[Dict[str, Any]], entries: List[Dict[str, Any]]) -> None:
+    for msg in entries:
         msg_type = msg.get("type", "assistant")
         raw = msg.get("message", "")
-        if msg_type in {"assistant_with_tools", "tool"}:
+        if is_user_entry(msg):
+            contents.append({"role": "user", "parts": [_gemini_text_part(raw)]})
+        elif msg_type in {"assistant_with_tools", "tool"}:
             try:
                 contents.append(json.loads(raw))
             except (json.JSONDecodeError, TypeError):
@@ -89,8 +91,14 @@ def gemini_fill_payload(
     contents: List[Dict[str, Any]] = []
 
     system_instruction = message_history["system"]["message"] or model.system_prompt
-    _append_gemini_context(contents, message_history)
-    _append_gemini_history(contents, message_history)
+    plan = plan_history_replay(message_history, messages)
+    if plan.first_input_first:
+        _append_gemini_context(contents, message_history)
+        _append_gemini_history(contents, plan.entries)
+    else:
+        _append_gemini_history(contents, plan.entries)
+        if plan.emit_first_input:
+            contents.append({"role": "user", "parts": [_gemini_text_part(message_history["first_input"]["message"])]})
 
     first_input_text = (message_history.get("first_input") or {}).get("message") or ""
     _append_gemini_live_messages(contents, messages, first_input_text)

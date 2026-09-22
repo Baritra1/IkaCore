@@ -19,7 +19,6 @@ Three pieces:
 
 from __future__ import annotations
 
-import email.utils
 import json
 import logging
 import time
@@ -32,8 +31,10 @@ from IkaCore.agent_runtime_payloads import JsonDict, history_section, json_dict,
 
 from ..base import BareBoneModel
 from ..codex_constants import CODEX_API_URL
+from ..http_config import shared_ssl_context
 from ..model_metadata import CODEX_KNOWN_MODELS
 from ..request_interface import agent_tools_for_payload
+from ..retry_policy import backoff_seconds, is_retryable_status, parse_retry_after, retry_delay, retry_hint_seconds
 from .codex_responses import codex_responses_fill_payload
 from .codex_stream import CodexRetryableStreamError as _CodexRetryableStreamError
 from .codex_stream import classify_stream_error as _classify_stream_error
@@ -62,30 +63,8 @@ def _token_count(value: object) -> int:
     return 0
 
 
-def _parse_retry_after(header_value: Optional[str], default: float) -> float:
-    """Parse a Retry-After header, supporting both integer-seconds and HTTP-date
-    forms (RFC 7231 §7.1.3). Falls back to ``default`` on any failure.
-
-    Naive datetimes (RFC 5322 ``-0000`` zone, meaning "local time of the source
-    is unknown") are treated as UTC, otherwise ``.timestamp()`` would silently
-    use the local timezone and produce a wildly wrong wait."""
-    if not header_value:
-        return float(default)
-    # Form 1: integer seconds (common case)
-    try:
-        return max(0.0, float(header_value))
-    except (TypeError, ValueError):
-        pass
-    # Form 2: HTTP-date (rare but legal — e.g. "Wed, 21 Oct 2015 07:28:00 GMT")
-    try:
-        from datetime import timezone
-        parsed = email.utils.parsedate_to_datetime(header_value)
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return max(0.0, parsed.timestamp() - time.time())
-    except (TypeError, ValueError, IndexError, OverflowError):
-        pass
-    return float(default)
+# Kept under its original name for callers/tests; the parser now lives in retry_policy.
+_parse_retry_after = parse_retry_after
 
 
 def _sleep_before_retry(
@@ -213,10 +192,17 @@ def _codex_rate_headers(response: httpx.Response) -> dict[str, str]:
     }
 
 
-def _handle_codex_429(response: httpx.Response, body: str, attempt: int, max_retries: int, wait_seconds: int) -> None:
+def _json_or_none(body: str) -> object:
+    try:
+        return json.loads(body)
+    except ValueError:
+        return None
+
+
+def _handle_codex_429(response: httpx.Response, body: str, attempt: int, max_retries: int, wait_seconds: float) -> None:
     if attempt >= max_retries - 1:
         raise RuntimeError(f"codex backend returned 429 after {max_retries} attempts: {body[:500]}")
-    retry_after = _parse_retry_after(response.headers.get("retry-after"), wait_seconds)
+    retry_after = retry_delay(attempt, retry_hint_seconds(response.headers, _json_or_none(body)), wait_seconds)
     LOG.warning(
         "codex backend 429 (rate-limited); sleeping %.1fs (attempt %d/%d)",
         retry_after, attempt + 1, max_retries,
@@ -239,7 +225,7 @@ def _handle_codex_non_200(
     backoff: float,
     attempt: int,
     max_retries: int,
-    wait_seconds: int,
+    wait_seconds: float,
 ) -> None:
     status = response.status_code
     if status == 401:
@@ -250,10 +236,19 @@ def _handle_codex_non_200(
     if status == 429:
         _handle_codex_429(response, body, attempt, max_retries, wait_seconds)
         return
-    if 500 <= status < 600:
+    if is_retryable_status(status):  # 408, 409, 5xx (429 handled above)
         _handle_codex_5xx(status, body, backoff, attempt, max_retries)
         return
     raise RuntimeError(f"codex backend returned {status}: {body[:2000]}")
+
+
+def _open_codex_stream(
+    client: Optional[httpx.Client], api_url: str, headers: dict[str, str], payload: JsonDict, timeout: float
+) -> Any:
+    # A caller-provided client reuses pooled keep-alive connections; otherwise open a one-off stream.
+    if client is not None:
+        return client.stream("POST", api_url, headers=headers, json=payload, timeout=timeout)
+    return httpx.stream("POST", api_url, headers=headers, json=payload, timeout=timeout, verify=shared_ssl_context())
 
 
 def _request_codex_once(
@@ -264,9 +259,10 @@ def _request_codex_once(
     backoff: float,
     attempt: int,
     max_retries: int,
-    wait_seconds: int,
+    wait_seconds: float,
+    client: Optional[httpx.Client] = None,
 ) -> Optional[_CodexResponseShim]:
-    with httpx.stream("POST", api_url, headers=headers, json=payload, timeout=timeout) as response:
+    with _open_codex_stream(client, api_url, headers, payload, timeout) as response:
         rate_headers = _codex_rate_headers(response)
         if response.status_code == 200:
             data = _collect_stream(response)
@@ -297,11 +293,12 @@ def _request_codex_with_retries(
     payload: JsonDict,
     timeout: float,
     max_retries: int,
-    wait_seconds: int,
+    wait_seconds: float,
+    client: Optional[httpx.Client] = None,
 ) -> _CodexResponseShim:
     last_exc: Optional[Exception] = None
     for attempt in range(max_retries):
-        backoff = wait_seconds * (2 ** attempt)
+        backoff = backoff_seconds(attempt, wait_seconds)
         try:
             response = _request_codex_once(
                 api_url,
@@ -312,6 +309,7 @@ def _request_codex_with_retries(
                 attempt,
                 max_retries,
                 wait_seconds,
+                client,
             )
             if response is not None:
                 return response
@@ -348,7 +346,8 @@ def request_codex(
     payload: JsonDict,
     timeout: float = 900.0,
     max_retries: int = 3,
-    wait_seconds: int = 10,
+    wait_seconds: float = 1.0,
+    client: Optional[httpx.Client] = None,
 ) -> _CodexResponseShim:
     """POST to the Codex Responses endpoint and return a Response-shaped shim."""
     return _request_codex_with_retries(
@@ -358,6 +357,7 @@ def request_codex(
         timeout,
         max_retries,
         wait_seconds,
+        client,
     )
 
 

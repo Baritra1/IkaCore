@@ -178,9 +178,11 @@ def test_anthropic_payload_replays_history_normalizes_assistant_tools_and_contro
 
     assert payload["system"] == "fallback system"
     assert payload["messages"][0] == {"role": "user", "content": "first"}
-    assert payload["messages"][2]["content"][0] == {"type": "text", "text": " "}
+    # Tool-only assistant turns are sent as-is (no whitespace padding, which the API rejects),
+    # and an assistant turn with no content at all is dropped rather than padded.
+    assert payload["messages"][2]["content"] == [{"type": "tool_use", "id": "t1", "name": "search", "input": {}}]
     assert payload["messages"][3]["content"][0]["type"] == "tool_result"
-    assert payload["messages"][4]["content"] == [{"type": "text", "text": " "}]
+    assert len(payload["messages"]) == 4
     assert payload["tool_choice"] == {"type": "auto", "disable_parallel_tool_use": True}
 
 

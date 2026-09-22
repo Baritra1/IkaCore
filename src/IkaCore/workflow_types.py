@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, Protocol
 
@@ -72,6 +73,10 @@ class _WorkflowValueState(Protocol):
     _edges_by_source: dict[str, list[WorkflowEdge]]
     _next_edges_by_source: dict[str, list[WorkflowEdge]]
     _next_reachable_nodes: set[str]
+    _initial_context: Optional[str]
+    summarize_context_above_tokens: Optional[int]
+    _summary_memo: dict[tuple[Any, ...], Any]  # key -> workflow_core.SummarySlot
+    _summary_lock: threading.Lock
 
 
 class _WorkflowCoreServices(Protocol):

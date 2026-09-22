@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 class _WorkflowContextState(Protocol):
     message_history: Dict[str, Dict[str, object]]
+    prompt: str
     Stages: List[IkaStage]
     start_prompt: Optional[str]
     end_prompt: Optional[str]
@@ -105,12 +106,20 @@ class _CheckpointState(Protocol):
 
 
 class AgentWorkflowContextMixin:
-    def inject_workflow_context(self: _WorkflowContextState, context: str) -> None:
+    def inject_workflow_context(
+        self: _WorkflowContextState, context: str, label: str = "Context from upstream workflow steps:"
+    ) -> None:
+        """Give the agent upstream context *in addition to* its own task prompt.
+
+        The context is prepended, labelled, to ``self.prompt``, which simple and staged runs both
+        build their first message from, so the agent keeps its instructions and sees the context.
+        (Writing it into ``first_input`` instead made a simple agent use the context *as* its task
+        and a staged agent overwrite the context with its stage prompt.)
+        """
         if not context:
             return
-        current_first_input = self.message_history.get("first_input", {}).get("message", "")
-        combined = f"{context}\n\n{current_first_input}" if current_first_input else context
-        self.message_history["first_input"]["message"] = combined
+        own_task = self.prompt or ""
+        self.prompt = f"{label}\n{context}\n\n{own_task}" if own_task else context
 
     def apply_workflow_stage_wiring(self: _WorkflowContextState, stage_wiring: Dict[int, Dict[str, List["IkaBaseAgent"]]]) -> None:
         if not stage_wiring or not self.Stages:

@@ -315,7 +315,9 @@ class TestRequestCodexRetryLoop:
                 )
 
         assert calls["n"] == 3
-        assert sleeps == [1, 2]
+        # Exponential backoff from wait_seconds=1 with 0.75-1.0x jitter: ~1s then ~2s.
+        assert len(sleeps) == 2
+        assert 0.75 <= sleeps[0] <= 1.0 and 1.5 <= sleeps[1] <= 2.0
 
     def test_truncated_http_200_stream_retries(self):
         calls = {"n": 0}
@@ -402,7 +404,10 @@ class TestRequestCodexRetryLoop:
     def test_forces_stream_true_in_payload(self):
         captured = {}
 
-        def side_effect(method, url, *, headers, json, timeout):
+        def side_effect(method, url, *, headers, json, timeout, verify):
+            from IkaModel.http_config import shared_ssl_context
+
+            assert verify is shared_ssl_context()
             captured.update(json)
             return _FakeStreamCtx(200, events=_completed_event_stream())
 

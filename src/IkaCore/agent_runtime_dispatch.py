@@ -216,11 +216,17 @@ class SimpleExecutionDispatchMixin(StagedExecutionDispatchMixin):
             summary = final_message
         next_agent.message_history = {
             "system": {"message": next_agent.system_prompt or "", "tokens": 0},
-            "first_input": {"message": f"Previous agent summary:\n{summary}", "tokens": 0},
+            "first_input": {"message": "", "tokens": 0},
             "summary": {"message": "", "tokens": 0},
             "messages": {},
         }
-        return next_agent.execution()
+        # The hand-off is context for the next agent's own task, not a replacement for it.
+        own_prompt = next_agent.prompt
+        next_agent.inject_workflow_context(summary, label="Previous agent summary:")
+        try:
+            return next_agent.execution()
+        finally:
+            next_agent.prompt = own_prompt
 
     def _run_simple_final_output(self) -> JsonDict:
         final_message, _ = self.run_simple()
