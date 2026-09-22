@@ -71,12 +71,6 @@ Codex support is documented in the [Provider Selection](docs/USAGE.md#provider-s
 - `examples/example_hitl.py`
 - `examples/example_workflow.py`
 
-## Benchmarks
-
-`python -m benchmarks` measures runtime overhead across agents, stages, subagents, workflows,
-checkpointing and HITL against an in-process fake provider, and fails if behavior drifts from
-`benchmarks/golden.json`. See [benchmarks/README.md](benchmarks/README.md).
-
 ## Development Notes
 
 This repo is maintained with `pytest` and `ruff`. Runtime modules and examples should import through the installed package rather than mutating `sys.path`; keep docs and examples aligned with public API changes.
